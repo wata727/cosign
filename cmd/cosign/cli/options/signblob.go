@@ -33,6 +33,7 @@ type SignBlobOptions struct {
 	OIDC                 OIDCOptions
 	Registry             RegistryOptions
 	BundlePath           string
+	SigstoreBundlePath   string
 	SkipConfirmation     bool
 	TlogUpload           bool
 	TSAClientCACert      string
@@ -74,6 +75,10 @@ func (o *SignBlobOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&o.BundlePath, "bundle", "",
 		"write everything required to verify the blob to a FILE")
 	_ = cmd.Flags().SetAnnotation("bundle", cobra.BashCompFilenameExt, []string{})
+
+	cmd.Flags().StringVar(&o.SigstoreBundlePath, "sigstore-bundle", "",
+		"write the Sigstore bundle defined in sigstore/protobuf-specs to a FILE")
+	_ = cmd.Flags().SetAnnotation("sigstore-bundle", cobra.BashCompFilenameExt, []string{})
 
 	cmd.Flags().BoolVarP(&o.SkipConfirmation, "yes", "y", false,
 		"skip confirmation prompts for non-destructive operations")

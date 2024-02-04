@@ -28,6 +28,8 @@ bin*
 dist/
 cosignImagerefs
 bundle
+!pkg/bundle
+!pkg/cosign/bundle
 signature
 certificate
 

@@ -30,10 +30,12 @@ import (
 	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa"
 	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa/client"
 	"github.com/sigstore/cosign/v2/internal/ui"
+	"github.com/sigstore/cosign/v2/pkg/bundle"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
 	cbundle "github.com/sigstore/cosign/v2/pkg/cosign/bundle"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	signatureoptions "github.com/sigstore/sigstore/pkg/signature/options"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // nolint
@@ -69,13 +71,10 @@ func SignBlobCmd(ro *options.RootOptions, ko options.KeyOpts, payloadPath string
 		return nil, fmt.Errorf("signing blob: %w", err)
 	}
 
-	signedPayload := cosign.LocalSignedPayload{}
+	signedEntity := cbundle.SignedEntity{}
 
 	var rfc3161Timestamp *cbundle.RFC3161Timestamp
 	if ko.TSAServerURL != "" {
-		if ko.RFC3161TimestampPath == "" {
-			return nil, fmt.Errorf("timestamp output path must be set")
-		}
 		var respBytes []byte
 		var err error
 		if ko.TSAClientCACert == "" && ko.TSAClientCert == "" { // no mTLS params or custom CA
@@ -95,20 +94,24 @@ func SignBlobCmd(ro *options.RootOptions, ko options.KeyOpts, payloadPath string
 			}
 		}
 
-		rfc3161Timestamp = cbundle.TimestampToRFC3161Timestamp(respBytes)
-		// TODO: Consider uploading RFC3161 TS to Rekor
+		if ko.RFC3161TimestampPath != "" {
+			rfc3161Timestamp = cbundle.TimestampToRFC3161Timestamp(respBytes)
+			// TODO: Consider uploading RFC3161 TS to Rekor
 
-		if rfc3161Timestamp == nil {
-			return nil, fmt.Errorf("rfc3161 timestamp is nil")
+			if rfc3161Timestamp == nil {
+				return nil, fmt.Errorf("rfc3161 timestamp is nil")
+			}
+			ts, err := json.Marshal(rfc3161Timestamp)
+			if err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(ko.RFC3161TimestampPath, ts, 0600); err != nil {
+				return nil, fmt.Errorf("create RFC3161 timestamp file: %w", err)
+			}
+			ui.Infof(ctx, "RFC3161 timestamp written to file %s\n", ko.RFC3161TimestampPath)
 		}
-		ts, err := json.Marshal(rfc3161Timestamp)
-		if err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(ko.RFC3161TimestampPath, ts, 0600); err != nil {
-			return nil, fmt.Errorf("create RFC3161 timestamp file: %w", err)
-		}
-		ui.Infof(ctx, "RFC3161 timestamp written to file %s\n", ko.RFC3161TimestampPath)
+
+		signedEntity.RFC3161Timestamps = [][]byte{respBytes}
 	}
 	shouldUpload, err := ShouldUploadToTlog(ctx, ko, nil, tlogUpload)
 	if err != nil {
@@ -128,20 +131,28 @@ func SignBlobCmd(ro *options.RootOptions, ko options.KeyOpts, payloadPath string
 			return nil, err
 		}
 		ui.Infof(ctx, "tlog entry created with index: %d", *entry.LogIndex)
-		signedPayload.Bundle = cbundle.EntryToBundle(entry)
+		signedEntity.LogEntry = entry
 	}
 
 	// if bundle is specified, just do that and ignore the rest
 	if ko.BundlePath != "" {
-		signedPayload.Base64Signature = base64.StdEncoding.EncodeToString(sig)
+		signedEntity.Signature = bundle.NewMessageSignature(payload.Sum(nil), "SHA2_256", sig)
 
-		certBytes, err := extractCertificate(ctx, sv)
+		if sv.Cert != nil {
+			certs, err := cryptoutils.UnmarshalCertificatesFromPEM(sv.Cert)
+			if err != nil {
+				return nil, fmt.Errorf("unmarshal certificate from PEM: %w", err)
+			}
+			signedEntity.VerificationMaterial = &bundle.CertificateChain{Certificates: certs}
+		} else {
+			signedEntity.VerificationMaterial = &bundle.PublicKey{}
+		}
+
+		bundle, err := cbundle.Build(&signedEntity)
 		if err != nil {
 			return nil, err
 		}
-		signedPayload.Cert = base64.StdEncoding.EncodeToString(certBytes)
-
-		contents, err := json.Marshal(signedPayload)
+		contents, err := json.Marshal(bundle)
 		if err != nil {
 			return nil, err
 		}
@@ -149,6 +160,34 @@ func SignBlobCmd(ro *options.RootOptions, ko options.KeyOpts, payloadPath string
 			return nil, fmt.Errorf("create bundle file: %w", err)
 		}
 		ui.Infof(ctx, "Wrote bundle to file %s", ko.BundlePath)
+	}
+	if ko.SigstoreBundlePath != "" {
+		signedEntity.Signature = bundle.NewMessageSignature(payload.Sum(nil), "SHA2_256", sig)
+
+		if sv.Cert != nil {
+			certs, err := cryptoutils.UnmarshalCertificatesFromPEM(sv.Cert)
+			if err != nil {
+				return nil, fmt.Errorf("unmarshal certificate from PEM: %w", err)
+			}
+			// TODO: how to cut out the root certificate?
+			signedEntity.VerificationMaterial = &bundle.CertificateChain{Certificates: certs}
+		} else {
+			signedEntity.VerificationMaterial = &bundle.PublicKey{}
+		}
+
+		bundle, err := bundle.Build(&signedEntity)
+		if err != nil {
+			return nil, err
+		}
+
+		contents, err := protojson.Marshal(bundle)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(ko.SigstoreBundlePath, contents, 0600); err != nil {
+			return nil, fmt.Errorf("create bundle file: %w", err)
+		}
+		ui.Infof(ctx, "Wrote bundle to file %s", ko.SigstoreBundlePath)
 	}
 
 	if outputSignature != "" {
